@@ -4,7 +4,7 @@ AI 交易助手 — FastAPI HTTP 服务
 """
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Body
@@ -78,8 +78,11 @@ class SyncConfigRequest(BaseModel):
 
 # ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-def _today():
+def _today() -> str:
     return date.today().strftime("%Y-%m-%d")
+
+def _date_ago(days: int) -> str:
+    return (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
 
 def _rows_to_list(rows) -> list[dict]:
     return [dict(r) for r in rows]
@@ -114,8 +117,7 @@ def validate_trade(req: ValidateRequest):
 @app.get("/api/validate/history")
 def get_validation_history(days: int = 30):
     """历史验证记录"""
-    from datetime import timedelta
-    start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+    start = _date_ago(days)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM validation_records WHERE validate_date>=? ORDER BY created_at DESC",
@@ -211,8 +213,7 @@ def get_unread_alerts():
 
 @app.get("/api/alerts/history")
 def get_alert_history(days: int = 30):
-    from datetime import timedelta
-    start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+    start = _date_ago(days)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM position_alerts WHERE alert_date>=? ORDER BY created_at DESC",
@@ -270,8 +271,7 @@ def radar_signals(date: Optional[str] = None, min_score: float = 0):
 
 @app.get("/api/radar/stock/{stock_code}")
 def radar_stock_history(stock_code: str):
-    from datetime import timedelta
-    start = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start = _date_ago(30)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM quant_signals WHERE stock_code=? AND trade_date>=? ORDER BY trade_date DESC",
@@ -459,8 +459,7 @@ async def upload_excel(file: UploadFile = File(...)):
 
 @app.get("/api/sync/log")
 def get_sync_log(days: int = 7):
-    from datetime import timedelta
-    start = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+    start = _date_ago(days)
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT * FROM sync_log WHERE created_at>=? ORDER BY created_at DESC LIMIT 100",

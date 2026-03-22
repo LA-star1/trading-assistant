@@ -73,15 +73,14 @@ def _score_correlation(stock_code: str, positions: list[dict]) -> tuple[float, f
         return 80.0, 0.0
 
     try:
-        from collectors.stock_fundamentals import get_stock_info as _info
-        target_info = _info(stock_code)
-        target_sector = target_info.get("sector", "")
-
-        total_weight = sum(p.get("current_weight", 0) or 0 for p in positions)
+        target_sector = get_stock_info(stock_code).get("sector", "")
+        # Fetch all sectors in one pass to avoid N separate calls
+        sector_map = {p["stock_code"]: get_stock_info(p["stock_code"]).get("sector", "")
+                      for p in positions}
         same_sector_weight = sum(
             p.get("current_weight", 0) or 0
             for p in positions
-            if _info(p["stock_code"]).get("sector", "") == target_sector
+            if sector_map.get(p["stock_code"]) == target_sector
         )
         # 买入后该行业暴露（假设新仓位 5%）
         sector_exposure_after = same_sector_weight + 5.0
@@ -303,25 +302,20 @@ def validate_trade(
 
 def _get_northbound_net(stock_code: str) -> float | None:
     """从数据库读取近5日北向资金净买入（万元）"""
+    # Use subquery so LIMIT applies before SUM (not after)
+    sql = """
+        SELECT SUM(net_buy_amount) AS total
+        FROM (
+            SELECT net_buy_amount FROM north_bound
+            WHERE stock_code=? ORDER BY trade_date DESC LIMIT 5
+        )
+    """
     with get_conn() as conn:
-        row = conn.execute("""
-            SELECT SUM(net_buy_amount) as total
-            FROM north_bound
-            WHERE stock_code=?
-            ORDER BY trade_date DESC
-            LIMIT 5
-        """, (stock_code,)).fetchone()
-    if row and row["total"] is not None:
-        return float(row["total"])
-    # 回退：用市场总体北向方向
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT SUM(net_buy_amount) as total
-            FROM north_bound
-            WHERE stock_code='__TOTAL_NORTH__'
-            ORDER BY trade_date DESC
-            LIMIT 5
-        """).fetchone()
+        row = conn.execute(sql, (stock_code,)).fetchone()
+        if row and row["total"] is not None:
+            return float(row["total"])
+        # 回退：用市场总体北向方向
+        row = conn.execute(sql, ("__TOTAL_NORTH__",)).fetchone()
     return float(row["total"]) if row and row["total"] else None
 
 

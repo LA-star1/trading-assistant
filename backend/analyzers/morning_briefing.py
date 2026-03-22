@@ -10,12 +10,13 @@
 import json
 import logging
 from datetime import date, datetime
+from typing import Optional
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db import get_conn
 from collectors.market_overview import get_market_overview
-from analyzers.ai_engine import generate_morning_briefing
+from analyzers.ai_engine import generate_morning_briefing as _ai_generate_briefing
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def _get_position_alerts_summary() -> list[dict]:
     """获取今日未读持仓预警摘要"""
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT pa.stock_code, pa.stock_name, pa.alert_type, pa.alert_message,
+            SELECT pa.stock_code, pa.stock_name, pa.alert_type, pa.description,
                    pa.severity, up.current_weight
             FROM position_alerts pa
             LEFT JOIN user_positions up ON pa.stock_code = up.stock_code AND up.is_active=1
@@ -58,13 +59,22 @@ def generate_today_briefing(force: bool = False) -> dict:
     if not force:
         with get_conn() as conn:
             existing = conn.execute(
-                "SELECT id, ai_summary, market_data FROM morning_briefings WHERE brief_date=?",
+                "SELECT us_market_summary, ai_summary, ai_focus_points FROM morning_briefings WHERE briefing_date=?",
                 (today,)
             ).fetchone()
         if existing and existing["ai_summary"]:
-            result = {"brief_date": today, "from_cache": True}
-            result.update(json.loads(existing["ai_summary"]) if existing["ai_summary"] else {})
-            result["market_data"] = json.loads(existing["market_data"]) if existing["market_data"] else {}
+            result: dict = {"briefing_date": today, "from_cache": True,
+                            "ai_summary": existing["ai_summary"]}
+            if existing["ai_focus_points"]:
+                try:
+                    result["ai_focus_points"] = json.loads(existing["ai_focus_points"])
+                except Exception:
+                    result["ai_focus_points"] = []
+            if existing["us_market_summary"]:
+                try:
+                    result["market_data"] = json.loads(existing["us_market_summary"])
+                except Exception:
+                    result["market_data"] = {}
             return result
 
     # 1. 市场数据
@@ -79,53 +89,77 @@ def generate_today_briefing(force: bool = False) -> dict:
     # 4. 从量化雷达库取今日信号
     with get_conn() as conn:
         signals = conn.execute("""
-            SELECT stock_code, stock_name, signal_type, score, reason
+            SELECT stock_code, stock_name, signal_type, score
             FROM quant_signals
-            WHERE signal_date=? AND score >= 60
+            WHERE trade_date=? AND score >= 60
             ORDER BY score DESC LIMIT 5
         """, (today,)).fetchall()
     radar_signals = [dict(r) for r in signals]
 
-    # 5. AI 生成
-    ai_result = generate_morning_briefing(market, positions, alerts, radar_signals)
+    # 5. 组装 AI 上下文
+    context = {
+        "positions":     positions,
+        "watchlist":     [],
+        "overnight":     market,
+        "position_news": [f"{a.get('alert_type','')}: {a.get('description','')}" for a in alerts],
+        "northbound":    market.get("northbound", {}),
+        "catalysts":     [
+            f"{s.get('stock_name','')} {s.get('signal_type','')} 评分{s.get('score','')}"
+            for s in radar_signals
+        ],
+    }
+    ai_result = _ai_generate_briefing(context)
+    # ai_result = {"ai_summary": str, "ai_focus_points": list[str]}
 
     # 6. 写库
-    market_json  = json.dumps(market, ensure_ascii=False)
-    summary_json = json.dumps(ai_result, ensure_ascii=False)
-
     with get_conn() as conn:
         conn.execute("""
-            INSERT INTO morning_briefings (brief_date, market_data, ai_summary, created_at)
-            VALUES (?,?,?,datetime('now'))
-            ON CONFLICT(brief_date) DO UPDATE SET
-                market_data=excluded.market_data,
+            INSERT INTO morning_briefings
+                (briefing_date, us_market_summary, ai_summary, ai_focus_points, created_at)
+            VALUES (?,?,?,?,datetime('now'))
+            ON CONFLICT(briefing_date) DO UPDATE SET
+                us_market_summary=excluded.us_market_summary,
                 ai_summary=excluded.ai_summary,
+                ai_focus_points=excluded.ai_focus_points,
                 created_at=excluded.created_at
-        """, (today, market_json, summary_json))
+        """, (
+            today,
+            json.dumps(market, ensure_ascii=False),
+            ai_result.get("ai_summary", ""),
+            json.dumps(ai_result.get("ai_focus_points", []), ensure_ascii=False),
+        ))
 
-    result = {
-        "brief_date": today,
-        "from_cache": False,
-        "market_data": market,
+    return {
+        "briefing_date":  today,
+        "from_cache":     False,
+        "market_data":    market,
+        "ai_summary":     ai_result.get("ai_summary", ""),
+        "ai_focus_points": ai_result.get("ai_focus_points", []),
     }
-    result.update(ai_result)
-    return result
 
 
-def get_briefing(target_date: str | None = None) -> dict | None:
+def get_briefing(target_date: Optional[str] = None) -> Optional[dict]:
     """获取指定日期早盘速览（默认今日）"""
     target = target_date or date.today().isoformat()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM morning_briefings WHERE brief_date=?",
-            (target,)
+            "SELECT * FROM morning_briefings WHERE briefing_date=?", (target,)
         ).fetchone()
     if not row:
         return None
 
-    result = {"brief_date": target}
-    if row["market_data"]:
-        result["market_data"] = json.loads(row["market_data"])
-    if row["ai_summary"]:
-        result.update(json.loads(row["ai_summary"]))
+    result: dict = {
+        "briefing_date":  target,
+        "ai_summary":     row["ai_summary"] or "",
+    }
+    if row["ai_focus_points"]:
+        try:
+            result["ai_focus_points"] = json.loads(row["ai_focus_points"])
+        except Exception:
+            result["ai_focus_points"] = []
+    if row["us_market_summary"]:
+        try:
+            result["market_data"] = json.loads(row["us_market_summary"])
+        except Exception:
+            result["market_data"] = {}
     return result

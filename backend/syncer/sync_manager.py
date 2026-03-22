@@ -78,6 +78,7 @@ def sync_positions(syncer: BaseSyncer, sync_method: str) -> int:
         return 0
 
     broker_codes = {p.stock_code for p in broker_positions}
+    total_mv = sum(p.market_value for p in broker_positions) or 1.0  # compute once
 
     with get_conn() as conn:
         existing = {
@@ -86,8 +87,7 @@ def sync_positions(syncer: BaseSyncer, sync_method: str) -> int:
         }
 
         for p in broker_positions:
-            weight = p.market_value / sum(bp.market_value for bp in broker_positions) * 100 \
-                     if broker_positions else 0
+            weight = p.market_value / total_mv * 100
             if p.stock_code in existing:
                 conn.execute("""
                     UPDATE user_positions SET
@@ -241,6 +241,8 @@ def import_from_excel(file_path_or_bytes) -> dict:
     positions = importer.get_positions()
 
     written_trades = 0
+    written_pos = 0
+    now = datetime.now().isoformat()
     with get_conn() as conn:
         for t in trades:
             try:
@@ -251,13 +253,10 @@ def import_from_excel(file_path_or_bytes) -> dict:
                     VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """, (t.trade_date, t.stock_code, t.stock_name, t.direction,
                       t.price, t.shares, t.amount, t.commission,
-                      "excel", t.broker_order_id, datetime.now().isoformat()))
+                      "excel", t.broker_order_id, now))
                 written_trades += 1
             except Exception:
                 pass
-
-    written_pos = 0
-    with get_conn() as conn:
         for p in positions:
             try:
                 conn.execute("""

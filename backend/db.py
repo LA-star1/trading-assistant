@@ -295,13 +295,6 @@ def get_conn():
     finally:
         conn.close()
 
-def get_db():
-    """兼容旧接口：返回一个可直接使用的连接（调用方需手动关闭）"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
 def init_db():
     with get_conn() as conn:
         conn.executescript(DDL)
@@ -313,19 +306,14 @@ def insert_seed_data():
         for k, v in DEFAULT_USER_CONFIG.items():
             conn.execute("INSERT OR IGNORE INTO user_config(key,value) VALUES(?,?)", (k, v))
         # 量化席位种子
-        inserted = 0
         for s in SEED_QUANT_SEATS:
-            try:
-                conn.execute(
-                    "INSERT INTO quant_seats(seat_name,linked_fund,confidence) VALUES(?,?,?)",
-                    (s["seat_name"], s.get("linked_fund",""), s.get("confidence","medium"))
-                )
-                inserted += 1
-            except Exception:
-                pass
+            conn.execute(
+                "INSERT OR IGNORE INTO quant_seats(seat_name,linked_fund,confidence) VALUES(?,?,?)",
+                (s["seat_name"], s.get("linked_fund",""), s.get("confidence","medium"))
+            )
         # 默认同步配置
         conn.execute("INSERT OR IGNORE INTO sync_config(id,sync_method) VALUES(1,'manual')")
-    logger.info("种子数据写入完成（量化席位 %d 条）", inserted)
+    logger.info("种子数据写入完成")
 
 def get_user_config() -> dict:
     with get_conn() as conn:

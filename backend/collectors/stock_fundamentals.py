@@ -142,15 +142,18 @@ def get_daily_history(stock_code: str, days: int = 60) -> pd.DataFrame:
         # 写缓存（只写最近 120 日避免过大）
         cutoff = (date.today() - timedelta(days=120)).strftime("%Y-%m-%d")
         df_cache = df_raw[df_raw["date"] >= cutoff]
+        rows_to_insert = [
+            (stock_code, row["date"], row.get("open"), row.get("high"),
+             row.get("low"), row.get("close"), row.get("volume"),
+             row.get("amount"), row.get("turnover"))
+            for _, row in df_cache.iterrows()
+        ]
         with get_conn() as conn:
-            for _, row in df_cache.iterrows():
-                conn.execute("""
-                    INSERT OR REPLACE INTO stock_daily_cache
-                        (stock_code, trade_date, open, high, low, close, volume, amount, turnover)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                """, (stock_code, row["date"], row.get("open"), row.get("high"),
-                      row.get("low"), row.get("close"), row.get("volume"),
-                      row.get("amount"), row.get("turnover")))
+            conn.executemany("""
+                INSERT OR REPLACE INTO stock_daily_cache
+                    (stock_code, trade_date, open, high, low, close, volume, amount, turnover)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, rows_to_insert)
 
         logger.debug("日线数据 %s：共 %d 行", stock_code, len(df_raw))
         return df_raw.tail(days).reset_index(drop=True)
